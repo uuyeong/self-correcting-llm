@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# Data & cache (large files)
+hidden_states_cache/
+*.npy
+*.npz
+*.pkl
+*.h5
+
+# Model weights
+*.bin
+*.safetensors
+*.pt
+*.pth
+models_cache/
+
+# Environment
+.env
+*.env
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+logs/
+runs/
+
+# Results (raw, generated during experiments)
+results/raw/
+
+# IDE
+.vscode/
+.idea/
+*.swp

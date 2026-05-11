@@ -1,0 +1,21 @@
+{
+  "_comment": "Populated after running all experiments. Sample format shown below.",
+  "samples": [
+    {
+      "id": 0,
+      "question": "(example) What is the capital of Australia?",
+      "original_answer": "(example) Sydney",
+      "hallucination_score": 0.82,
+      "strategy_applied": "HIGH",
+      "corrected_answer": "(example) Canberra is the capital of Australia.",
+      "token_cost": 12,
+      "latency_ms": 2340.5,
+      "layer_aurocs": []
+    }
+  ],
+  "summary": {
+    "Baseline 1 (No detect)":   {"accuracy": null, "token_cost": null, "latency_ms": null},
+    "Baseline 2 (Always regen)":{"accuracy": null, "token_cost": null, "latency_ms": null},
+    "Ours (3-tier)":            {"accuracy": null, "token_cost": null, "latency_ms": null}
+  }
+}

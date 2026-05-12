@@ -22,6 +22,7 @@ class LLMWrapper:
         model_name: str = config.PRIMARY_MODEL,
         load_in_4bit: bool = config.LOAD_IN_4BIT,
         device_map: str = "auto",
+        cache_dir: str | None = None,  # Drive 캐시 경로 (예: /content/drive/.../hf_cache)
     ):
         self.model_name = model_name
         bnb_config = (
@@ -34,12 +35,13 @@ class LLMWrapper:
             if load_in_4bit
             else None
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             quantization_config=bnb_config,
             device_map=device_map,
+            cache_dir=cache_dir,
         )
         self.model.eval()
         self.n_layers = self.model.config.num_hidden_layers

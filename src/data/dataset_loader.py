@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
 
 from datasets import load_dataset
 
@@ -127,9 +126,10 @@ def load_popqa(split: str = "test", max_samples: int | None = 2000) -> list[dict
     records = []
     for ex in ds:
         domain = _infer_domain(ex["question"])
+        answers = ex.get("possible_answers") or []
         records.append({
             "question": ex["question"],
-            "answer":   ex["possible_answers"][0] if ex["possible_answers"] else "",
+            "answer":   answers[0] if answers else "",
             "label":    0,              # PopQA provides correct answers only
             "domain":   domain,
         })

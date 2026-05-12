@@ -40,7 +40,6 @@ class LLMWrapper:
             model_name,
             quantization_config=bnb_config,
             device_map=device_map,
-            output_hidden_states=True,
         )
         self.model.eval()
         self.n_layers = self.model.config.num_hidden_layers
@@ -120,19 +119,18 @@ class LLMWrapper:
             hidden_states: list of n_layers tensors, each shape (1, H)
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-        with torch.no_grad():
-            # Get hidden states of the prompt
-            fwd = self.model(**inputs, output_hidden_states=True)
-            prompt_hs = [hs[0, -1:].float().cpu() for hs in fwd.hidden_states[1:]]
+        # Get hidden states of the prompt (separate forward pass)
+        fwd = self.model(**inputs, output_hidden_states=True)
+        prompt_hs = [hs[0, -1:].float().cpu() for hs in fwd.hidden_states[1:]]
 
-            # Generate continuation
-            output_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                top_p=top_p,
-                temperature=temperature,
-                do_sample=do_sample,
-            )
+        # Generate continuation (output_hidden_states NOT set → no per-step HS overhead)
+        output_ids = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            top_p=top_p,
+            temperature=temperature,
+            do_sample=do_sample,
+        )
 
         new_ids = output_ids[0, inputs["input_ids"].shape[1]:]
         text = self.tokenizer.decode(new_ids, skip_special_tokens=True)

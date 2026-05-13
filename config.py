@@ -37,7 +37,7 @@ MID_A_TOP_P = 0.70        # MID-A: conservative top-p sampling
 DOLA_ALPHA  = 1.0         # MID-B: DoLa logit contrast weight
 
 # Optimal probing layer (updated after Exp 1)
-BEST_LAYER = None         # set after running exp1_layer_analysis.py
+BEST_LAYER = 16         # set after running exp1_layer_analysis.py
 
 # ── Datasets ───────────────────────────────────────────────────────────────
 TRUTHFULQA_SPLIT = "validation"

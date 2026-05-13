@@ -126,10 +126,12 @@ def load_popqa(split: str = "test", max_samples: int | None = 2000) -> list[dict
     records = []
     for ex in ds:
         domain = _infer_domain(ex["question"])
-        answers = ex.get("possible_answers") or []
+        possible = ex.get("possible_answers") or []
+        if isinstance(possible, str):
+            possible = json.loads(possible)
         records.append({
             "question": ex["question"],
-            "answer":   answers[0] if answers else "",
+            "answer":   possible[0] if possible else "",
             "label":    0,              # PopQA provides correct answers only
             "domain":   domain,
         })

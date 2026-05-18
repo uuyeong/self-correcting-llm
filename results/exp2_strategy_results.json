@@ -1,0 +1,34 @@
+{
+  "Baseline": {
+    "accuracy": 0.14,
+    "token_cost": 0.0,
+    "latency_ms": 0.0,
+    "efficiency": 140000000.0
+  },
+  "MID-A": {
+    "accuracy": 0.395,
+    "token_cost": 128.995,
+    "latency_ms": 10547.450568605,
+    "efficiency": 2.903198428217634e-07
+  },
+  "HIGH": {
+    "accuracy": 0.33,
+    "token_cost": 128.52,
+    "latency_ms": 10503.458453099991,
+    "efficiency": 2.444617413997104e-07
+  },
+  "Ours": {
+    "accuracy": 0.305,
+    "token_cost": 67.305,
+    "latency_ms": 5501.795273089988,
+    "efficiency": 8.236602074211503e-07
+  },
+  "_meta": {
+    "level_counts": {
+      "LOW": 95,
+      "MID": 19,
+      "HIGH": 86
+    },
+    "n_samples": 200
+  }
+}

@@ -1,18 +1,22 @@
-"""Exp 2: 3-tier regeneration strategy effect comparison.
+"""Exp 2: 3-tier regeneration strategy comparison.
 
-Measures Factual Accuracy / Token Cost / Latency for each strategy level
-(LOW / MID-A / HIGH) on HaluEval samples.
+Compares 4 strategies on HaluEval hallucinated samples:
+  - Baseline : always pass-through (return hallucinated answer)
+  - MID-A    : always apply top-p=0.7 regeneration
+  - HIGH     : always apply full regeneration
+  - Ours     : classifier-guided adaptive strategy
 
 Outputs:
     - results/exp2_strategy_results.json
     - results/figures/exp2_strategy_comparison.pdf
 
-Prerequisite: Run exp1 first and set config.BEST_LAYER.
+Prerequisite: exp1 complete, BEST_LAYER set in config.py
 """
 
 import json
+import os
 import pickle
-import time
+from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
@@ -20,103 +24,129 @@ from tqdm import tqdm
 import config
 from src.data.dataset_loader import load_halueval
 from src.models.llm_wrapper import LLMWrapper
-from src.models.probing_classifier import ProbingResult
 from src.pipeline.hallucination_detector import HallucinationDetector, StrategyLevel
 from src.pipeline.regeneration_strategy import RegenerationStrategy
 from src.visualization.plots import plot_strategy_comparison
 
 
-def factual_accuracy(predictions: list[str], references: list[str]) -> float:
-    """Simple EM-based factual accuracy (placeholder for BERTScore)."""
-    hits = sum(
-        any(ref.lower() in pred.lower() for ref in refs.split("|"))
-        for pred, refs in zip(predictions, references)
-    )
-    return hits / len(predictions)
+def _hs_cache_dir() -> Path:
+    env = os.environ.get("HS_CACHE")
+    return Path(env) if env else config.CACHE_DIR
+
+
+def _load_pairs(path, n: int = 200) -> list[dict]:
+    """Return list of {question, correct, hallucinated} from HaluEval."""
+    records = load_halueval(path)
+    pairs = []
+    for i in range(0, len(records) - 1, 2):
+        r_correct = records[i]
+        r_hall    = records[i + 1]
+        if r_correct["question"] == r_hall["question"]:
+            pairs.append({
+                "question":     r_correct["question"],
+                "correct":      r_correct["answer"],
+                "hallucinated": r_hall["answer"],
+            })
+    return pairs[:n]
+
+
+def factual_accuracy(preds: list[str], correct_refs: list[str]) -> float:
+    """Check if correct reference is contained in each prediction."""
+    hits = sum(ref.lower() in pred.lower() for pred, ref in zip(preds, correct_refs))
+    return hits / max(len(preds), 1)
 
 
 def main():
     assert config.BEST_LAYER is not None, "Run exp1 first and set BEST_LAYER in config.py"
     print("=== Exp 2: Strategy Comparison ===")
 
-    # ── Load HaluEval ─────────────────────────────────────────────────────
-    records = load_halueval(config.HALUEVAL_PATH)
-    # Use a balanced subset for speed
-    from sklearn.utils import resample
-    pos = [r for r in records if r["label"] == 1][:200]
-    neg = [r for r in records if r["label"] == 0][:200]
-    records = pos + neg
-    np.random.seed(42)
-    np.random.shuffle(records)
-    questions   = [r["question"] for r in records]
-    answers_ref = [r["answer"]   for r in records]
-    labels      = np.array([r["label"] for r in records])
+    hs_dir = _hs_cache_dir()
 
-    # ── Load probing result ───────────────────────────────────────────────
-    with open(config.RESULTS_DIR / "exp1_probing_result.pkl", "rb") as f:
-        probing_result: ProbingResult = pickle.load(f)
+    # ── Data ──────────────────────────────────────────────────────────────
+    pairs = _load_pairs(config.HALUEVAL_PATH, n=200)
+    questions  = [p["question"]     for p in pairs]
+    corrects   = [p["correct"]      for p in pairs]
+    hall_ans   = [p["hallucinated"] for p in pairs]
+    print(f"Using {len(pairs)} HaluEval question pairs")
 
-    wrapper   = LLMWrapper(model_name=config.PRIMARY_MODEL)
-    detector  = HallucinationDetector(probing_result, layer=config.BEST_LAYER)
+    # ── Probing classifier ────────────────────────────────────────────────
+    pkl_path = hs_dir / "exp1_probing_result.pkl"
+    with open(pkl_path, "rb") as f:
+        probing_result = pickle.load(f)
 
-    # ── Extract hidden states ─────────────────────────────────────────────
-    cache = config.CACHE_DIR / "exp2_hidden_states.npy"
-    if cache.exists():
-        hs = np.load(cache)
+    wrapper  = LLMWrapper(model_name=config.PRIMARY_MODEL)
+    detector = HallucinationDetector(probing_result, layer=config.BEST_LAYER)
+
+    # ── Hidden states for hallucinated answers ────────────────────────────
+    hs_path = hs_dir / "exp2_hidden_states.npy"
+    if hs_path.exists():
+        print(f"Loading cached HS from {hs_path}")
+        hs = np.load(hs_path)
     else:
-        hs = wrapper.extract_hidden_states(questions, answers_ref)
-        np.save(cache, hs)
+        print("Extracting hidden states for hallucinated answers...")
+        hs = wrapper.extract_hidden_states(questions, hall_ans, batch_size=8)
+        np.save(hs_path, hs)
+        print(f"Saved to {hs_path}")
 
-    layer_hs = hs[:, config.BEST_LAYER, :]           # (N, H)
-    classifications = detector.classify_batch(layer_hs)  # [(level, score), ...]
+    layer_hs        = hs[:, config.BEST_LAYER, :]
+    classifications = detector.classify_batch(layer_hs)
 
     # ── Run strategies ─────────────────────────────────────────────────────
-    strategy_results: dict[str, dict] = {
-        "LOW":    {"preds": [], "costs": [], "latencies": []},
-        "MID-A":  {"preds": [], "costs": [], "latencies": []},
-        "HIGH":   {"preds": [], "costs": [], "latencies": []},
-    }
+    strat = RegenerationStrategy(wrapper, mid_variant="A")
 
-    strat_low  = RegenerationStrategy(wrapper, mid_variant="A")
-    strat_mida = RegenerationStrategy(wrapper, mid_variant="A")
-    strat_high = RegenerationStrategy(wrapper, mid_variant="A")
+    strategy_preds: dict[str, list] = {k: [] for k in ["Baseline", "MID-A", "HIGH", "Ours"]}
+    strategy_costs: dict[str, list] = {k: [] for k in ["Baseline", "MID-A", "HIGH", "Ours"]}
+    strategy_lats:  dict[str, list] = {k: [] for k in ["Baseline", "MID-A", "HIGH", "Ours"]}
 
-    for i, (question, answer, (level, score)) in enumerate(
-        tqdm(zip(questions, answers_ref, classifications), total=len(questions))
+    for i, (question, hall, (level, _)) in enumerate(
+        tqdm(zip(questions, hall_ans, classifications), total=len(questions), desc="Running strategies")
     ):
         prompt = f"Q: {question}\nA:"
 
-        for strategy_name, forced_level in [
-            ("LOW",  StrategyLevel.LOW),
-            ("MID-A", StrategyLevel.MID),
-            ("HIGH",  StrategyLevel.HIGH),
+        for name, forced_level in [
+            ("Baseline", StrategyLevel.LOW),
+            ("MID-A",    StrategyLevel.MID),
+            ("HIGH",     StrategyLevel.HIGH),
         ]:
-            out = strat_low.apply(prompt, answer, forced_level)
-            strategy_results[strategy_name]["preds"].append(out["text"])
-            strategy_results[strategy_name]["costs"].append(out["token_cost"])
-            strategy_results[strategy_name]["latencies"].append(out["latency_ms"])
+            out = strat.apply(prompt, hall, forced_level)
+            strategy_preds[name].append(out["text"] if name != "Baseline" else hall)
+            strategy_costs[name].append(out["token_cost"])
+            strategy_lats[name].append(out["latency_ms"])
 
-    # ── Compute metrics ───────────────────────────────────────────────────
+        # Ours: classifier-guided
+        out = strat.apply(prompt, hall, level)
+        strategy_preds["Ours"].append(out["text"] if level != StrategyLevel.LOW else hall)
+        strategy_costs["Ours"].append(out["token_cost"])
+        strategy_lats["Ours"].append(out["latency_ms"])
+
+    # ── Metrics ───────────────────────────────────────────────────────────
     summary = {}
-    for name, data in strategy_results.items():
-        acc = factual_accuracy(data["preds"], answers_ref)
+    for name in ["Baseline", "MID-A", "HIGH", "Ours"]:
+        acc = factual_accuracy(strategy_preds[name], corrects)
         summary[name] = {
-            "accuracy":    acc,
-            "token_cost":  float(np.mean(data["costs"])),
-            "latency_ms":  float(np.mean(data["latencies"])),
-            "efficiency":  acc / max(np.mean(data["costs"]) * np.mean(data["latencies"]), 1e-9),
+            "accuracy":   acc,
+            "token_cost": float(np.mean(strategy_costs[name])),
+            "latency_ms": float(np.mean(strategy_lats[name])),
+            "efficiency": acc / max(np.mean(strategy_costs[name]) * np.mean(strategy_lats[name]), 1e-9),
         }
 
-    with open(config.RESULTS_DIR / "exp2_strategy_results.json", "w") as f:
+    level_counts = {lv.value: sum(1 for l, _ in classifications if l == lv)
+                    for lv in StrategyLevel}
+    summary["_meta"] = {"level_counts": level_counts, "n_samples": len(pairs)}
+
+    out_path = config.RESULTS_DIR / "exp2_strategy_results.json"
+    with open(out_path, "w") as f:
         json.dump(summary, f, indent=2)
 
     print("\nResults:")
-    for name, metrics in summary.items():
-        print(f"  {name}: acc={metrics['accuracy']:.3f}, "
-              f"cost={metrics['token_cost']:.1f}, lat={metrics['latency_ms']:.1f}ms")
+    for name in ["Baseline", "MID-A", "HIGH", "Ours"]:
+        m = summary[name]
+        print(f"  {name:8s}: acc={m['accuracy']:.3f}, "
+              f"cost={m['token_cost']:.1f} tok, lat={m['latency_ms']:.1f} ms")
+    print(f"\nLevel distribution: {level_counts}")
 
-    plot_strategy_comparison(summary)
-    print(f"\nFigure saved to {config.FIGURES_DIR}/exp2_strategy_comparison.pdf")
+    plot_strategy_comparison({k: summary[k] for k in ["Baseline", "MID-A", "HIGH", "Ours"]})
+    print(f"Figure saved: {config.FIGURES_DIR}/exp2_strategy_comparison.pdf")
 
 
 if __name__ == "__main__":

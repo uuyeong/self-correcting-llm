@@ -1,6 +1,6 @@
 """Exp 3: MID-A (top-p) vs MID-B (DoLa) comparison.
 
-Both strategies applied to MID-level samples only.
+Applied only to samples the classifier assigns MID level.
 
 Outputs:
     - results/exp3_mid_comparison.json
@@ -8,7 +8,9 @@ Outputs:
 """
 
 import json
+import os
 import pickle
+from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
@@ -16,83 +18,111 @@ from tqdm import tqdm
 import config
 from src.data.dataset_loader import load_halueval
 from src.models.llm_wrapper import LLMWrapper
-from src.models.probing_classifier import ProbingResult
 from src.pipeline.hallucination_detector import HallucinationDetector, StrategyLevel
 from src.pipeline.regeneration_strategy import RegenerationStrategy
 from src.visualization.plots import plot_mid_ab_comparison
 
 
-def factual_accuracy(predictions: list[str], references: list[str]) -> float:
-    hits = sum(
-        any(ref.lower() in pred.lower() for ref in refs.split("|"))
-        for pred, refs in zip(predictions, references)
-    )
-    return hits / len(predictions)
+def _hs_cache_dir() -> Path:
+    env = os.environ.get("HS_CACHE")
+    return Path(env) if env else config.CACHE_DIR
+
+
+def factual_accuracy(preds: list[str], correct_refs: list[str]) -> float:
+    hits = sum(ref.lower() in pred.lower() for pred, ref in zip(preds, correct_refs))
+    return hits / max(len(preds), 1)
 
 
 def main():
     assert config.BEST_LAYER is not None, "Run exp1 first and set BEST_LAYER in config.py"
     print("=== Exp 3: MID-A vs MID-B ===")
 
+    hs_dir = _hs_cache_dir()
+
+    # ── Data: correct + hallucinated pairs ───────────────────────────────
     records = load_halueval(config.HALUEVAL_PATH)
-    # Select samples that land in MID zone (will be verified by classifier)
-    with open(config.RESULTS_DIR / "exp1_probing_result.pkl", "rb") as f:
-        probing_result: ProbingResult = pickle.load(f)
+    pairs = []
+    for i in range(0, len(records) - 1, 2):
+        rc, rh = records[i], records[i + 1]
+        if rc["question"] == rh["question"]:
+            pairs.append({"question": rc["question"],
+                          "correct": rc["answer"],
+                          "hallucinated": rh["answer"]})
+    pairs = pairs[:500]
+
+    questions = [p["question"]     for p in pairs]
+    corrects  = [p["correct"]      for p in pairs]
+    hall_ans  = [p["hallucinated"] for p in pairs]
+
+    # ── Probing classifier ────────────────────────────────────────────────
+    pkl_path = hs_dir / "exp1_probing_result.pkl"
+    with open(pkl_path, "rb") as f:
+        probing_result = pickle.load(f)
 
     wrapper  = LLMWrapper(model_name=config.PRIMARY_MODEL)
     detector = HallucinationDetector(probing_result, layer=config.BEST_LAYER)
 
-    questions   = [r["question"] for r in records[:500]]
-    answers_ref = [r["answer"]   for r in records[:500]]
-
-    cache = config.CACHE_DIR / "exp3_hidden_states.npy"
-    if cache.exists():
-        hs = np.load(cache)
+    # ── Hidden states ─────────────────────────────────────────────────────
+    hs_path = hs_dir / "exp3_hidden_states.npy"
+    if hs_path.exists():
+        print(f"Loading cached HS from {hs_path}")
+        hs = np.load(hs_path)
     else:
-        hs = wrapper.extract_hidden_states(questions, answers_ref)
-        np.save(cache, hs)
+        print("Extracting hidden states...")
+        hs = wrapper.extract_hidden_states(questions, hall_ans, batch_size=8)
+        np.save(hs_path, hs)
 
-    layer_hs       = hs[:, config.BEST_LAYER, :]
+    layer_hs        = hs[:, config.BEST_LAYER, :]
     classifications = detector.classify_batch(layer_hs)
 
     mid_indices = [i for i, (lv, _) in enumerate(classifications) if lv == StrategyLevel.MID]
-    print(f"MID-level samples: {len(mid_indices)}")
+    print(f"MID-level samples: {len(mid_indices)} / {len(pairs)}")
 
+    if not mid_indices:
+        print("No MID samples found — adjust thresholds in config.py")
+        return
+
+    # ── MID-A vs MID-B ────────────────────────────────────────────────────
     strat_a = RegenerationStrategy(wrapper, mid_variant="A")
     strat_b = RegenerationStrategy(
-        wrapper, mid_variant="B",
+        wrapper,
+        mid_variant="B",
         dola_high_layer=config.BEST_LAYER,
         dola_low_layer=max(0, config.BEST_LAYER - 8),
     )
 
-    results = {"MID-A": {"preds": [], "costs": [], "latencies": []},
-               "MID-B": {"preds": [], "costs": [], "latencies": []}}
+    res = {name: {"preds": [], "costs": [], "latencies": []}
+           for name in ["MID-A", "MID-B"]}
 
     for i in tqdm(mid_indices, desc="MID samples"):
         prompt = f"Q: {questions[i]}\nA:"
         for name, strat in [("MID-A", strat_a), ("MID-B", strat_b)]:
-            out = strat.apply(prompt, answers_ref[i], StrategyLevel.MID)
-            results[name]["preds"].append(out["text"])
-            results[name]["costs"].append(out["token_cost"])
-            results[name]["latencies"].append(out["latency_ms"])
+            out = strat.apply(prompt, hall_ans[i], StrategyLevel.MID)
+            res[name]["preds"].append(out["text"])
+            res[name]["costs"].append(out["token_cost"])
+            res[name]["latencies"].append(out["latency_ms"])
 
-    mid_refs = [answers_ref[i] for i in mid_indices]
+    mid_corrects = [corrects[i] for i in mid_indices]
     summary = {}
-    for name, data in results.items():
+    for name, data in res.items():
         summary[name] = {
-            "accuracy":   factual_accuracy(data["preds"], mid_refs),
+            "accuracy":   factual_accuracy(data["preds"], mid_corrects),
             "token_cost": float(np.mean(data["costs"])),
             "latency_ms": float(np.mean(data["latencies"])),
         }
+    summary["_meta"] = {"n_mid_samples": len(mid_indices)}
 
-    with open(config.RESULTS_DIR / "exp3_mid_comparison.json", "w") as f:
+    out_path = config.RESULTS_DIR / "exp3_mid_comparison.json"
+    with open(out_path, "w") as f:
         json.dump(summary, f, indent=2)
 
-    print(f"\nMID-A: {summary['MID-A']}")
-    print(f"MID-B: {summary['MID-B']}")
+    print(f"\nMID-A: acc={summary['MID-A']['accuracy']:.3f}, "
+          f"lat={summary['MID-A']['latency_ms']:.1f} ms")
+    print(f"MID-B: acc={summary['MID-B']['accuracy']:.3f}, "
+          f"lat={summary['MID-B']['latency_ms']:.1f} ms")
 
     plot_mid_ab_comparison(summary["MID-A"], summary["MID-B"])
-    print(f"\nFigure saved to {config.FIGURES_DIR}/exp3_mid_ab.pdf")
+    print(f"Figure saved: {config.FIGURES_DIR}/exp3_mid_ab.pdf")
 
 
 if __name__ == "__main__":

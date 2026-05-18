@@ -28,6 +28,10 @@ def _hs_cache_dir() -> Path:
     return Path(env) if env else config.CACHE_DIR
 
 
+def _halueval_path() -> str:
+    return os.environ.get("HALUEVAL_PATH") or str(config.HALUEVAL_PATH)
+
+
 def factual_accuracy(preds: list[str], correct_refs: list[str]) -> float:
     hits = sum(ref.lower() in pred.lower() for pred, ref in zip(preds, correct_refs))
     return hits / max(len(preds), 1)
@@ -40,7 +44,7 @@ def main():
     hs_dir = _hs_cache_dir()
 
     # ── Data: correct + hallucinated pairs ───────────────────────────────
-    records = load_halueval(config.HALUEVAL_PATH)
+    records = load_halueval(_halueval_path())
     pairs = []
     for i in range(0, len(records) - 1, 2):
         rc, rh = records[i], records[i + 1]

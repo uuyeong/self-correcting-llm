@@ -34,6 +34,10 @@ def _hs_cache_dir() -> Path:
     return Path(env) if env else config.CACHE_DIR
 
 
+def _halueval_path() -> str:
+    return os.environ.get("HALUEVAL_PATH") or str(config.HALUEVAL_PATH)
+
+
 def _load_pairs(path, n: int = 200) -> list[dict]:
     """Return list of {question, correct, hallucinated} from HaluEval."""
     records = load_halueval(path)
@@ -63,7 +67,7 @@ def main():
     hs_dir = _hs_cache_dir()
 
     # ── Data ──────────────────────────────────────────────────────────────
-    pairs = _load_pairs(config.HALUEVAL_PATH, n=200)
+    pairs = _load_pairs(_halueval_path(), n=200)
     questions  = [p["question"]     for p in pairs]
     corrects   = [p["correct"]      for p in pairs]
     hall_ans   = [p["hallucinated"] for p in pairs]
